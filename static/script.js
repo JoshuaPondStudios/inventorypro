@@ -49,7 +49,7 @@ document.addEventListener('alpine:init', () => {
             this.$watch('searchQuery', () => this.searchDevices());
             feather.replace();
         },
-
+		
         // Data Loading
         async loadCategories() {
             const response = await fetch('/api/categories');

@@ -85,13 +85,50 @@
         
         <!-- Main Content -->
         <div class="main-content">
-            <header class="app-header bg-white border-b border-gray-200 px-6 flex justify-between items-center fixed top-0 left-[240px] z-30 h-[77px]" style="width: calc(100% - 240px);">
-                <h1 class="text-2xl font-semibold" x-text="activeCategory ? getCategoryName(activeCategory) : 'All Devices'"></h1>
-                <button @click="openAddDeviceModal()" class="btn-primary flex items-center space-x-2">
-                    <i data-feather="plus" class="w-4 h-4"></i>
-                    <span>Add Device</span>
-                </button>
-            </header>
+			<header class="app-header bg-white border-b border-gray-200 px-6 flex justify-between items-center fixed top-0 left-[240px] z-30 h-[77px]" style="width: calc(100% - 240px);">
+				<!-- Linke Seite: Titel -->
+				<h1 class="text-2xl font-semibold" x-text="activeCategory ? getCategoryName(activeCategory) : 'All Devices'"></h1>
+
+				<!-- Rechte Seite: Button-Gruppe -->
+				<div class="flex items-center space-x-4">
+				  <!-- Add Device Button im Logout-Style -->
+				  <button @click="openAddDeviceModal()" class="text-red-600 hover:text-red-800 flex items-center">
+					<i data-feather="plus" class="w-5 h-5 mr-2"></i>
+					<span>Add Device</span>
+				  </button>
+
+				  <!-- Trennlinie -->
+				  <div class="h-5 w-px bg-gray-300"></div>
+
+				  <!-- Logout Button -->
+				  <button onclick="logout()" class="text-red-600 hover:text-red-800 flex items-center">
+					<i data-feather="log-out" class="w-5 h-5 mr-2"></i>
+					Abmelden
+				  </button>
+				</div>
+
+				<!-- Logout Script -->
+				<script>
+					async function logout() {
+						try {
+							const response = await fetch('/logout', {
+								method: 'POST',
+								credentials: 'same-origin',
+								headers: { 'Content-Type': 'application/json' }
+							});
+
+							if (response.ok) {
+								window.location.href = 'https://inv.pondsec.com/login';
+							} else {
+								const data = await response.json();
+								alert('Logout failed: ' + (data.error || 'Unknown error'));
+							}
+						} catch (error) {
+							alert('Network error: ' + error.message);
+						}
+					}
+				</script>
+			</header>
 
             <main class="p-6 mt-16">
 				<div class="mb-6 w-full max-w-md mx-auto">
@@ -344,7 +381,7 @@
         });
     </script>
 	<script src="https://unpkg.com/alpinejs@3.x.x/dist/cdn.min.js" defer></script>
-
+	
 	<style>
 		:root {
 		  --bg-light: #f9f9fb;
