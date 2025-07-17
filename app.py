@@ -1,0 +1,289 @@
+from flask import Flask, render_template, jsonify, request, g, redirect, url_for, session
+from flask_cors import CORS
+from werkzeug.security import generate_password_hash, check_password_hash
+import sqlite3
+import json
+from functools import wraps
+import os
+
+app = Flask(__name__)
+CORS(app)
+app.secret_key = os.urandom(24).hex()
+
+DATABASE = 'inventory.db'
+
+def get_db():
+    db = getattr(g, '_database', None)
+    if db is None:
+        db = g._database = sqlite3.connect(DATABASE)
+        db.row_factory = sqlite3.Row
+    return db
+
+@app.teardown_appcontext
+def close_connection(exception):
+    db = getattr(g, '_database', None)
+    if db is not None:
+        db.close()
+
+def init_db():
+    with app.app_context():
+        db = get_db()
+        c = db.cursor()
+
+        # Benutzer-Tabelle
+        c.execute('''
+            CREATE TABLE IF NOT EXISTS users (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                username TEXT NOT NULL UNIQUE,
+                password_hash TEXT NOT NULL
+            )
+        ''')
+
+        # Kategorien-Tabelle
+        c.execute('''
+            CREATE TABLE IF NOT EXISTS categories (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL UNIQUE,
+                icon TEXT,
+                fields TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        ''')
+
+        # Geräte-Tabelle
+        c.execute('''
+            CREATE TABLE IF NOT EXISTS devices (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL,
+                category_id INTEGER NOT NULL,
+                serial_number TEXT,
+                specs TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (category_id) REFERENCES categories(id)
+            )
+        ''')
+
+        # Default-Kategorien
+        default_categories = [
+            ("CPU", "cpu", '{"cores":"number","clock":"text","manufacturer":"text"}'),
+            ("GPU", "gpu", '{"vram":"text","model":"text","manufacturer":"text"}'),
+            ("RAM", "memory", '{"size":"text","type":"text","speed":"text"}')
+        ]
+        c.executemany('''
+            INSERT OR IGNORE INTO categories (name, icon, fields)
+            VALUES (?, ?, ?)
+        ''', default_categories)
+
+        db.commit()
+
+# Setup-Funktion zum Benutzer erstellen
+def create_user(username, password):
+    with app.app_context():
+        db = get_db()
+        password_hash = generate_password_hash(password)
+        try:
+            db.execute("INSERT INTO users (username, password_hash) VALUES (?, ?)", (username, password_hash))
+            db.commit()
+            print(f"[+] Benutzer '{username}' erstellt.")
+        except sqlite3.IntegrityError:
+            print(f"[!] Benutzer '{username}' existiert bereits.")
+
+def delete_user(username):
+    with app.app_context():
+        db = get_db()
+        result = db.execute("DELETE FROM users WHERE username = ?", (username,))
+        db.commit()
+        if result.rowcount > 0:
+            print(f"[✓] Benutzer '{username}' gelöscht.")
+        else:
+            print(f"[!] Benutzer '{username}' nicht gefunden.")
+
+
+# Login Required
+def login_required(f):
+    @wraps(f)
+    def decorated_function(*args, **kwargs):
+        if not session.get('logged_in'):
+            return redirect(url_for('login'))
+        return f(*args, **kwargs)
+    return decorated_function
+
+@app.route('/login', methods=['GET', 'POST'])
+def login():
+    if request.method == 'POST':
+        username = request.form.get('username')
+        password = request.form.get('password')
+
+        db = get_db()
+        user = db.execute('SELECT * FROM users WHERE username = ?', (username,)).fetchone()
+
+        if user and check_password_hash(user['password_hash'], password):
+            session['logged_in'] = True
+            session['username'] = username
+            return redirect(url_for('index'))
+
+        return render_template('login.html', error="Ungültige Anmeldedaten")
+
+    return render_template('login.html')
+
+@app.route('/logout')
+def logout():
+    session.clear()
+    return redirect(url_for('login'))
+
+@app.route('/')
+@login_required
+def index():
+    return render_template('index.html', username=session.get('username'))
+
+@app.route('/api/categories/<int:category_id>', methods=['PUT', 'DELETE'])
+@login_required
+def handle_category(category_id):
+    db = get_db()
+
+    if request.method == 'PUT':
+        try:
+            data = request.get_json()
+            name = data['name'].strip()
+            icon = data.get('icon', 'default').strip()
+            fields = json.dumps(data['fields'])
+
+            result = db.execute('''
+                UPDATE categories 
+                SET name = ?, icon = ?, fields = ?
+                WHERE id = ?
+            ''', (name, icon, fields, category_id))
+
+            if result.rowcount == 0:
+                return jsonify({"error": "Kategorie nicht gefunden"}), 404
+
+            db.commit()
+            return jsonify({"status": "updated"}), 200
+
+        except (KeyError, TypeError, ValueError) as e:
+            return jsonify({"error": f"Ungültige Daten: {str(e)}"}), 400
+
+    elif request.method == 'DELETE':
+        result = db.execute('DELETE FROM categories WHERE id = ?', (category_id,))
+        if result.rowcount == 0:
+            return jsonify({"error": "Kategorie nicht gefunden"}), 404
+
+        db.commit()
+        return jsonify({"status": "deleted"}), 200
+
+@app.route('/api/categories', methods=['GET', 'POST'])
+@login_required
+def handle_categories():
+    db = get_db()
+    if request.method == 'POST':
+        data = request.get_json()
+        try:
+            db.execute('''
+                INSERT INTO categories (name, icon, fields)
+                VALUES (?, ?, ?)
+            ''', (data['name'], data.get('icon', 'cpu'), json.dumps(data['fields'])))
+            db.commit()
+            return jsonify({"status": "success"}), 201
+        except sqlite3.IntegrityError:
+            return jsonify({"error": "Kategorie existiert bereits"}), 400
+    
+    categories = db.execute('SELECT * FROM categories ORDER BY name').fetchall()
+    return jsonify([dict(row) for row in categories])
+
+@app.route('/api/devices/<int:device_id>', methods=['PUT', 'DELETE'])
+@login_required
+def handle_device(device_id):
+    db = get_db()
+
+    if request.method == 'PUT':
+        try:
+            data = request.get_json()
+            name = data['name'].strip()
+            serial_number = data.get('serial_number', '').strip()
+            specs = json.dumps(data.get('specs', {}))
+            category_id = data.get('category_id')
+
+            result = db.execute('''
+                UPDATE devices 
+                SET name = ?, serial_number = ?, specs = ?, category_id = ?
+                WHERE id = ?
+            ''', (name, serial_number, specs, category_id, device_id))
+
+            if result.rowcount == 0:
+                return jsonify({"error": "Gerät nicht gefunden"}), 404
+
+            db.commit()
+            return jsonify({"status": "updated"}), 200
+
+        except (KeyError, TypeError, ValueError) as e:
+            return jsonify({"error": f"Ungültige Daten: {str(e)}"}), 400
+
+    elif request.method == 'DELETE':
+        result = db.execute('DELETE FROM devices WHERE id = ?', (device_id,))
+        if result.rowcount == 0:
+            return jsonify({"error": "Gerät nicht gefunden"}), 404
+
+        db.commit()
+        return jsonify({"status": "deleted"}), 200
+
+@app.route('/api/devices', methods=['POST'])
+@login_required
+def handle_devices():
+    db = get_db()
+    try:
+        data = request.get_json()
+        required_fields = ['name', 'category_id']
+        if not all(field in data for field in required_fields):
+            return jsonify({"error": "Fehlende erforderliche Felder"}), 400
+
+        db.execute('''
+            INSERT INTO devices (name, category_id, serial_number, specs)
+            VALUES (?, ?, ?, ?)
+        ''', (
+            data['name'].strip(),
+            data['category_id'],
+            data.get('serial_number', '').strip(),
+            json.dumps(data.get('specs', {}))
+        ))
+        db.commit()
+        return jsonify({"status": "created"}), 201
+
+    except sqlite3.Error as e:
+        return jsonify({"error": f"Datenbankfehler: {str(e)}"}), 500
+    except Exception as e:
+        return jsonify({"error": f"Serverfehler: {str(e)}"}), 500
+
+@app.route('/api/devices', methods=['GET'])
+@login_required
+def get_devices():
+    db = get_db()
+    category_id = request.args.get('category_id')
+    search_query = request.args.get('search', '').strip()
+
+    query = '''
+        SELECT d.*, c.name as category_name, c.icon as category_icon 
+        FROM devices d
+        JOIN categories c ON d.category_id = c.id
+    '''
+    params = []
+    
+    conditions = []
+    if category_id:
+        conditions.append('d.category_id = ?')
+        params.append(category_id)
+    
+    if search_query:
+        conditions.append('(d.name LIKE ? OR d.serial_number LIKE ?)')
+        params.extend([f'%{search_query}%', f'%{search_query}%'])
+    
+    if conditions:
+        query += ' WHERE ' + ' AND '.join(conditions)
+    
+    query += ' ORDER BY d.created_at DESC'
+    
+    devices = db.execute(query, params).fetchall()
+    return jsonify([dict(row) for row in devices])
+
+if __name__ == '__main__':
+    init_db()
+    app.run(host='0.0.0.0', port=5000, debug=True)
