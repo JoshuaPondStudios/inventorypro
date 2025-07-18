@@ -301,7 +301,61 @@ def get_devices():
     devices = db.execute(query, params).fetchall()
     return jsonify([dict(row) for row in devices])
 
-
+@app.route('/stats')
+@login_required
+def stats():
+    db = get_db()
+    
+    # 1. Grundstatistiken mit Default-Werten
+    total_devices = db.execute('SELECT COUNT(*) FROM devices').fetchone()[0] or 0
+    total_categories = db.execute('SELECT COUNT(*) FROM categories').fetchone()[0] or 0
+    
+    # 2. Kategorieverteilung mit sicherer Abfrage
+    categories = db.execute('''
+        SELECT c.id, c.name, COUNT(d.id) as device_count
+        FROM categories c
+        LEFT JOIN devices d ON c.id = d.category_id
+        GROUP BY c.id
+    ''').fetchall()
+    categories_data = [dict(c) for c in categories] if categories else []
+    
+    # 3. Verbesserte Statusverteilung mit Default-Werten
+    status_data = {'Verwendet': 0, 'Lager': 0, 'Defekt': 0}
+    devices = db.execute('SELECT specs FROM devices').fetchall()
+    for device in devices:
+        try:
+            specs = json.loads(device['specs']) if device['specs'] else {}
+            status = specs.get('status', 'Verwendet')
+            # Normalisiere den Status (entferne Leerzeichen, mache erste Buchstabe groß)
+            status = status.strip().capitalize()
+            # Falls der Status nicht in unserer Liste ist, zählen wir als "Verwendet"
+            if status in status_data:
+                status_data[status] += 1
+            else:
+                status_data['Verwendet'] += 1
+        except json.JSONDecodeError:
+            status_data['Verwendet'] += 1
+    
+    # 4. Letzte Geräte mit sicherer Abfrage
+    recent_devices = db.execute('''
+        SELECT d.name, c.name as category_name, d.serial_number, d.created_at
+        FROM devices d
+        JOIN categories c ON d.category_id = c.id
+        ORDER BY d.created_at DESC
+        LIMIT 5
+    ''').fetchall()
+    recent_devices_data = [dict(d) for d in recent_devices] if recent_devices else []
+    
+    context = {
+        'total_devices': total_devices,
+        'total_categories': total_categories,
+        'categories': categories_data,
+        'status_data': status_data,
+        'recent_devices': recent_devices_data,
+        'username': session.get('username', '')
+    }
+    
+    return render_template('stats.html', **context)
 
 if __name__ == '__main__':
     init_db()
